@@ -14,7 +14,7 @@ Assignement copied from coursera.
 2. Simple logistic regresion model from scratch. [Simple Logistic Regresion model](Logistic_Regression_with_a_Neural_Network_v5.ipynb)
 3. Simple Nueron Network implementation. [Simple Neuron network implementation](NN_shallow_manual.py)
 
-##LSTM
+## LSTM
 
 1. LSTM [LSTM](LSTM.py)
 
