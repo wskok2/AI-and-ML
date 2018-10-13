@@ -176,3 +176,123 @@ df_model['clean_text'] = sr_clean
 df_model.columns.tolist()
 
 X_train, X_test, y_train, y_test = train_test_split(df_model.drop('airline_sentiment', axis=1), df_model.airline_sentiment, test_size=0.1, random_state=37)
+
+def grid_vect(clf, parameters_clf, X_train, X_test, parameters_text=None, vect=None, is_w2v=False):
+    
+    textcountscols = ['count_capital_words','count_emojis','count_excl_quest_marks','count_hashtags'
+                      ,'count_mentions','count_urls','count_words']
+    
+    if is_w2v:
+        w2vcols = []
+        for i in range(SIZE):
+            w2vcols.append(i)
+        features = FeatureUnion([('textcounts', ColumnExtractor(cols=textcountscols))
+                                 , ('w2v', ColumnExtractor(cols=w2vcols))]
+                                , n_jobs=-1)
+    else:
+        features = FeatureUnion([('textcounts', ColumnExtractor(cols=textcountscols))
+                                 , ('pipe', Pipeline([('cleantext', ColumnExtractor(cols='clean_text')), ('vect', vect)]))]
+                                , n_jobs=-1)
+    
+    pipeline = Pipeline([
+        ('features', features)
+        , ('clf', clf)
+    ])
+    
+    # Join the parameters dictionaries together
+    parameters = dict()
+    if parameters_text:
+        parameters.update(parameters_text)
+    parameters.update(parameters_clf)
+    # Make sure you have scikit-learn version 0.19 or higher to use multiple scoring metrics
+    grid_search = GridSearchCV(pipeline, parameters, n_jobs=-1, verbose=1, cv=5)
+    
+    print("Performing grid search...")
+    print("pipeline:", [name for name, _ in pipeline.steps])
+    print("parameters:")
+    pprint(parameters)
+    t0 = time()
+    grid_search.fit(X_train, y_train)
+    print("done in %0.3fs" % (time() - t0))
+    print()
+    print("Best CV score: %0.3f" % grid_search.best_score_)
+    print("Best parameters set:")
+    best_parameters = grid_search.best_estimator_.get_params()
+    for param_name in sorted(parameters.keys()):
+        print("\t%s: %r" % (param_name, best_parameters[param_name]))
+        
+    print("Test score with best_estimator_: %0.3f" % grid_search.best_estimator_.score(X_test, y_test))
+    print("\n")
+    print("Classification Report Test Data")
+    print(classification_report(y_test, grid_search.best_estimator_.predict(X_test)))
+                        
+    return grid_search
+
+# Parameter grid settings for the vectorizers (Count and TFIDF)
+parameters_vect = {
+    'features__pipe__vect__max_df': (0.25, 0.5, 0.75),
+    'features__pipe__vect__ngram_range': ((1, 1), (1, 2)),
+    'features__pipe__vect__min_df': (1,2)
+}
+
+# Parameter grid settings for MultinomialNB
+parameters_mnb = {
+    'clf__alpha': (0.25, 0.5, 0.75)
+}
+
+# Parameter grid settings for LogisticRegression
+parameters_logreg = {
+    'clf__C': (0.25, 0.5, 1.0),
+    'clf__penalty': ('l1', 'l2')
+}
+
+mnb = MultinomialNB()
+logreg = LogisticRegression()
+
+countvect = CountVectorizer()
+# MultinomialNB
+best_mnb_countvect = grid_vect(mnb, parameters_mnb, X_train, X_test, parameters_text=parameters_vect, vect=countvect)
+joblib.dump(best_mnb_countvect, '../output/best_mnb_countvect.pkl')
+# LogisticRegression
+best_logreg_countvect = grid_vect(logreg, parameters_logreg, X_train, X_test, parameters_text=parameters_vect, vect=countvect)
+joblib.dump(best_logreg_countvect, '../output/best_logreg_countvect.pkl')
+
+tfidfvect = TfidfVectorizer()
+# MultinomialNB
+best_mnb_tfidf = grid_vect(mnb, parameters_mnb, X_train, X_test, parameters_text=parameters_vect, vect=tfidfvect)
+joblib.dump(best_mnb_tfidf, '../output/best_mnb_tfidf.pkl')
+# LogisticRegression
+best_logreg_tfidf = grid_vect(logreg, parameters_mnb, X_train, X_test, parameters_text=parameters_vect, vect=tfidfvect)
+joblib.dump(best_logreg_tfidf, '../output/best_logreg_tfidf.pkl')
+
+SIZE = 50
+X_train['clean_text_wordlist'] = X_train.clean_text.apply(lambda x : word_tokenize(x))
+X_test['clean_text_wordlist'] = X_test.clean_text.apply(lambda x : word_tokenize(x))
+model = gensim.models.Word2Vec(X_train.clean_text_wordlist
+, min_count=1
+, size=SIZE
+, window=5
+, workers=4)
+model.most_similar('plane', topn=3)
+
+def compute_avg_w2v_vector(w2v_dict, tweet):
+    list_of_word_vectors = [w2v_dict[w] for w in tweet if w in w2v_dict.vocab.keys()]
+    
+    if len(list_of_word_vectors) == 0:
+        result = [0.0]*SIZE
+    else:
+        result = np.sum(list_of_word_vectors, axis=0) / len(list_of_word_vectors)
+        
+    return result
+X_train_w2v = X_train['clean_text_wordlist'].apply(lambda x: compute_avg_w2v_vector(model.wv, x))
+X_test_w2v = X_test['clean_text_wordlist'].apply(lambda x: compute_avg_w2v_vector(model.wv, x))
+
+
+X_train_w2v = pd.DataFrame(X_train_w2v.values.tolist(), index= X_train.index)
+X_test_w2v = pd.DataFrame(X_test_w2v.values.tolist(), index= X_test.index)
+# Concatenate with the TextCounts variables
+X_train_w2v = pd.concat([X_train_w2v, X_train.drop(['clean_text', 'clean_text_wordlist'], axis=1)], axis=1)
+X_test_w2v = pd.concat([X_test_w2v, X_test.drop(['clean_text', 'clean_text_wordlist'], axis=1)], axis=1)
+
+best_logreg_w2v = grid_vect(logreg, parameters_logreg, X_train_w2v, X_test_w2v, is_w2v=True)
+joblib.dump(best_logreg_w2v, '../output/best_logreg_w2v.pkl')
